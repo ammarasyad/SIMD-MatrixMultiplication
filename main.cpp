@@ -2,19 +2,15 @@
 #include <chrono>
 #include <cmath>
 #include <immintrin.h>
+#include <vector>
 
 int** init(int size) {
     int** newMat = new int*[size];
     for (int i = 0; i < size; i++) {
         newMat[i] = new int[size];
-    }
-    return newMat;
-}
-
-int** init_row_col(int rows, int cols) {
-    int** newMat = new int*[rows];
-    for (int i = 0; i < rows; i++) {
-        newMat[i] = new int[cols];
+        for (int j = 0; j < size; j++) {
+            newMat[i][j] = 2;
+        }
     }
     return newMat;
 }
@@ -62,6 +58,41 @@ int** avx_multiply(int** A, int** B, int size) {
         }
     }
     return C;
+}
+
+// Using void because it's better to have the result matrix as a parameter, too late to change the others now
+void avx_multiply_f(const std::vector<std::vector<float>>& A, const std::vector<std::vector<float>>& B, std::vector<std::vector<float>>& C, int size) {
+    __m256 a, b, mult;
+#pragma omp parallel for simd default(none) shared(A, B, C, size) private(a, b, mult)
+    for (int i = 0; i < size; i++) {
+        for (int j = 0; j < size; j++) {
+            a = _mm256_set1_ps(A[i][j]);
+            for (int k = 0; k < size; k += 8) {
+                b = _mm256_loadu_ps(&B[j][k]);
+                mult = _mm256_loadu_ps(&C[i][k]);
+                mult = _mm256_fmadd_ps(a, b, mult);
+                _mm256_storeu_ps(&C[i][k], mult);
+            }
+        }
+    }
+}
+
+// For matrices with a N^2 vector representation.
+// It provides a slight speedup but it is less readable.
+void avx_multiply_fv(const std::vector<float>& A, const std::vector<float>& B, std::vector<float>& C, int size) {
+    __m256 a, b, mult;
+#pragma omp parallel for simd default(none) shared(A, B, C, size) private(a,b, mult)
+    for (int i = 0; i < size; i++) {
+        for (int j = 0; j < size; j++) {
+            a = _mm256_set1_ps(A[i*size+j]);
+            for (int k = 0; k < size; k += 8) {
+                b = _mm256_loadu_ps(&B[j*size+k]);
+                mult = _mm256_loadu_ps(&C[i*size+k]);
+                mult = _mm256_fmadd_ps(a, b, mult);
+                _mm256_storeu_ps(&C[i*size+k], mult);
+            }
+        }
+    }
 }
 
 int** normal_multiply(int** A, int** B, int size) {
@@ -285,7 +316,7 @@ int** tensor_decomposition(int A[2][2], int B[2][2]) {
 
 int main() {
     // For simplicity, only square matrices are used, and built-in C++ vectors are not used in place of primitive integer 2D arrays.
-    int size = 2048; // A 2048x2048 matrix is used for testing.
+    int size = 4096; // A 2048x2048 matrix is used for testing.
 
     // Generate 2 matrices with junk values.
     int** A = init(size);
@@ -298,12 +329,22 @@ int main() {
     std::chrono::duration<double> elapsed = end_time - start_time;
     std::cout << "Strassen's Algorithm: " << elapsed.count() << "s" << std::endl;
 
+    for (int i = 0; i < size; i++) {
+        delete[] C[i];
+    }
+    delete[] C;
+
     // Naive algorithm.
     start_time = std::chrono::high_resolution_clock::now();
     int** D = normal_multiply(A, B, size);
     end_time = std::chrono::high_resolution_clock::now();
     elapsed = end_time - start_time;
     std::cout << "Naive Algorithm: " << elapsed.count() << "s" << std::endl;
+
+    for (int i = 0; i < size; i++) {
+        delete[] D[i];
+    }
+    delete[] D;
 
     // AVX algorithm.
     start_time = std::chrono::high_resolution_clock::now();
@@ -312,18 +353,46 @@ int main() {
     elapsed = end_time - start_time;
     std::cout << "AVX Algorithm: " << elapsed.count() << "s" << std::endl;
 
-    int count = 0;
     for (int i = 0; i < size; i++) {
-        for (int j = 0; j < size; j++) {
-            if (D[i][j] != E[i][j] || D[i][j] != C[i][j]) {
+        delete[] E[i];
+    }
+    delete[] E;
+
+    for (int i = 0; i < size; i++) {
+        delete[] A[i];
+        delete[] B[i];
+    }
+    delete[] A;
+    delete[] B;
+
+    // Using 2D float vectors for an even ground with the GPU.
+    std::vector<std::vector<float>> vecA(size, std::vector<float>(size, 2));
+    std::vector<std::vector<float>> vecB(size, std::vector<float>(size, 4));
+    std::vector<std::vector<float>> vecC(size, std::vector<float>(size, 0));
+//    std::vector<float> vecA(size*size, 2);
+//    std::vector<float> vecB(size*size, 4);
+//    std::vector<float> vecC(size*size, 0);
+
+    auto start = std::chrono::high_resolution_clock::now();
+    avx_multiply_f(vecA, vecB, vecC, size);
+//    avx_multiply_fv(vecA, vecB, vecC, size);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> diff = end - start;
+    std::cout << "AVX (float): " << diff.count() << "s" << std::endl;
+
+// Only for verification purposes.
+//    int count = 0;
+//    for (int i = 0; i < size; i++) {
+//        for (int j = 0; j < size; j++) {
+//            if (D[i][j] != E[i][j] || D[i][j] != C[i][j]) {
 //                std::cout << "Not match: " << i << ", " << j << std::endl;
 //                std::cout << "Expected result: " << C[i][j] << std::endl;
 //                std::cout << "Got: " << D[i][j] << std::endl;
-                count++;
-            }
-        }
-    }
-    std::cout << "Number of mismatches: " << count << std::endl;
+//                count++;
+//            }
+//        }
+//    }
+//    std::cout << "Number of mismatches: " << count << std::endl;
 
     int G[2][2] = {{1, 2},
                    {3, 4}};
@@ -341,15 +410,15 @@ int main() {
     elapsed = end_time - start_time;
     std::cout << "Naive Algorithm 2: " << elapsed.count() << "s" << std::endl;
 
-    for (int i = 0; i < 2; i++) {
-        for (int j = 0; j < 2; j++) {
-            if (P[i][j] != Q[i][j]) {
-                std::cout << "Not match: " << i << ", " << j << std::endl;
-                std::cout << "Expected result: " << P[i][j] << std::endl;
-                std::cout << "Got: " << Q[i][j] << std::endl;
-                return 1;
-            }
-        }
-    }
+// Only for verification purposes.
+//    for (int i = 0; i < 2; i++) {
+//        for (int j = 0; j < 2; j++) {
+//            if (P[i][j] != Q[i][j]) {
+//                std::cout << "Not match: " << i << ", " << j << std::endl;
+//                std::cout << "Expected result: " << P[i][j] << std::endl;
+//                std::cout << "Got: " << Q[i][j] << std::endl;
+//            }
+//        }
+//    }
     return 0;
 }
